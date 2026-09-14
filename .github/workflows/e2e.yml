@@ -42,16 +42,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          number="$(gh issue create --title 'e2e work item' --body 'resolve this' --json number --jq .number)"
-          echo "number=${number}" >> "$GITHUB_OUTPUT"
+          url="$(gh issue create --title 'e2e work item' --body 'resolve this')"
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
 
       - name: Create the not-work issue
         id: not_work_issue
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          number="$(gh issue create --title 'e2e not work' --body 'leave this alone' --json number --jq .number)"
-          echo "number=${number}" >> "$GITHUB_OUTPUT"
+          url="$(gh issue create --title 'e2e not work' --body 'leave this alone')"
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
 
       - name: An opened issue adds an item
         uses: ./work-items
