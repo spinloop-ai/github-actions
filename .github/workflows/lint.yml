@@ -1,0 +1,23 @@
+name: Lint
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Download actionlint
+        id: get_actionlint
+        shell: bash
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+
+      # The composite action at work-items/ is checked through the
+      # uses: ./work-items reference in e2e.yml: actionlint reads its
+      # metadata and validates the with: inputs against it.
+      - name: Check the workflows
+        shell: bash
+        run: ${{ steps.get_actionlint.outputs.executable }} -shellcheck=none .github/workflows/*.yml

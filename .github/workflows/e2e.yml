@@ -1,0 +1,159 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      spinloop_ref:
+        description: The spinloop-ai/spinloop ref to build
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: spinloop-ai/spinloop
+          ref: ${{ inputs.spinloop_ref }}
+          path: spinloop-src
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: spinloop-src/go.mod
+          cache: true
+
+      - name: Build spinloop
+        working-directory: spinloop-src
+        run: |
+          mkdir -p ../spinloop-bin
+          go build -o ../spinloop-bin/spinloop ./cmd/spinloop
+
+      - name: Create the work issue
+        id: work_issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number="$(gh issue create --title 'e2e work item' --body 'resolve this' --json number --jq .number)"
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the not-work issue
+        id: not_work_issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          number="$(gh issue create --title 'e2e not work' --body 'leave this alone' --json number --jq .number)"
+          echo "number=${number}" >> "$GITHUB_OUTPUT"
+
+      - name: An opened issue adds an item
+        uses: ./work-items
+        with:
+          event: opened
+          binary: ./spinloop-bin/spinloop
+          items: work.yaml
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          issue-title: e2e work item
+          issue-body: resolve this
+          dir: .
+          push: "false"
+
+      - name: Assert the item was added
+        run: |
+          test -f work.yaml
+          grep -q "${{ steps.work_issue.outputs.number }}" work.yaml
+
+      - name: A repeated open is a no-op
+        uses: ./work-items
+        with:
+          event: opened
+          binary: ./spinloop-bin/spinloop
+          items: work.yaml
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          issue-title: e2e work item
+          issue-body: resolve this
+          dir: .
+          push: "false"
+
+      - name: Assert the item appears once
+        run: test "$(grep -c "${{ steps.work_issue.outputs.number }}" work.yaml)" = 1
+
+      - name: Close the work issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue close "${{ steps.work_issue.outputs.number }}"
+
+      - name: A closed issue removes the item
+        uses: ./work-items
+        with:
+          event: closed
+          binary: ./spinloop-bin/spinloop
+          items: work.yaml
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          dir: .
+          push: "false"
+
+      - name: Assert the item was removed
+        run: |
+          if grep -q "${{ steps.work_issue.outputs.number }}" work.yaml 2>/dev/null; then
+            echo "the item for the closed issue should be gone" >&2
+            exit 1
+          fi
+
+      - name: A repeated close is a no-op
+        uses: ./work-items
+        with:
+          event: closed
+          binary: ./spinloop-bin/spinloop
+          items: work.yaml
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          dir: .
+          push: "false"
+
+      - name: Assert the item is still gone
+        run: |
+          if grep -q "${{ steps.work_issue.outputs.number }}" work.yaml 2>/dev/null; then
+            echo "the item for the closed issue should be gone" >&2
+            exit 1
+          fi
+
+      - name: An issue without the wanted label is not work
+        uses: ./work-items
+        with:
+          event: opened
+          binary: ./spinloop-bin/spinloop
+          items: work.yaml
+          id: ${{ steps.not_work_issue.outputs.number }}
+          issue-number: ${{ steps.not_work_issue.outputs.number }}
+          issue-title: e2e not work
+          issue-body: leave this alone
+          issue-labels: ""
+          labels: orchestration
+          dir: .
+          push: "false"
+
+      - name: Assert the not-work issue added nothing
+        run: |
+          if grep -q "${{ steps.not_work_issue.outputs.number }}" work.yaml 2>/dev/null; then
+            echo "the not-work issue should not have become work" >&2
+            exit 1
+          fi
+
+      - name: Close both issues
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue close "${{ steps.work_issue.outputs.number }}" || true
+          gh issue close "${{ steps.not_work_issue.outputs.number }}" || true
