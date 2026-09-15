@@ -11,7 +11,10 @@ between and no file to commit.
 
 The action carries its own `spinloop`: it downloads the release it works with
 for the runner's platform, so a runner installs nothing. A spinloop release
-that carries the `work` command family is required (v1.40.0 and later).
+that carries the API-based `work` command family is required — v1.40.0's
+`work` commands still work the items file, so until a release carries the API
+client, pin `version` to such a tag or pass a local build through `binary`,
+and the action says so where the binary it resolved will not do the job.
 
 ## Use it
 
@@ -57,7 +60,7 @@ releases, rather than `main`.
 | `tags` | none | the item's tags, comma-separated `key=value` pairs binding it to a kind of node |
 | `priority` | `0` | the item's priority, higher first |
 | `labels` | none | the labels an issue must carry, one of them, to become work; none named, every issue does |
-| `version` | `latest` | the spinloop release the client downloads, or a tag such as `v1.40.0` |
+| `version` | `latest` | the spinloop release the client downloads — `latest`, or a tag |
 | `binary` | none | a spinloop binary to work with instead of downloading a release |
 | `issue-title`, `issue-body`, `issue-number`, `issue-url`, `issue-labels` | the event's issue | the issue's fields; defaulted from the event, named for a workflow that works an issue the event does not carry |
 

@@ -40,7 +40,7 @@ inputs:
       comma-separated; where none are named, every issue does
     default: ""
   version:
-    description: The spinloop release to work with — latest, or a tag such as v1.40.0
+    description: The spinloop release to work with — latest, or a tag
     default: latest
   binary:
     description: >-
@@ -119,8 +119,8 @@ runs:
           chmod +x "$BIN"
         fi
 
-        if ! "$BIN" work --help >/dev/null 2>&1; then
-          echo "the spinloop at $BIN has no work command: pin version to a release that carries the work command family" >&2
+        if ! "$BIN" work add --help 2>&1 | grep -q -- "--url"; then
+          echo "the spinloop at $BIN has no API-based work command: its work commands still work the items file — pin version to a release that carries the API-based work command family, or pass a local build via binary" >&2
           exit 1
         fi
         echo "bin=$BIN" >> "$GITHUB_OUTPUT"
