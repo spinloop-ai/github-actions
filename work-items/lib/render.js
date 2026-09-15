@@ -16,7 +16,7 @@ const number = process.env.ISSUE_NUMBER || "";
 if (wanted.length > 0 && !wanted.some((w) => carried.includes(w))) {
   console.log(
     `SKIP: issue #${number} carries none of the labels this action works (` +
-      `${wanted.join(", ")}): it is not work, and the items file is untouched`,
+      `${wanted.join(", ")}): it is not work, and the work list is untouched`,
   );
   process.exit(0);
 }

@@ -1,17 +1,22 @@
 name: work-items
 description: >-
-  Turn GitHub issue events into orchestrator work items: an issue opened adds
-  an item to the work items file, a closed issue removes it — the file the
-  orchestrator works, worked in the caller's repo and, where it is on,
-  committed and pushed with the workflow's token.
+  Keep an orchestrator's work list in step with GitHub issues, over the
+  orchestrator's work list API: an issue opened adds an item, a closed issue
+  removes it — the orchestrator runs wherever the URL points.
 
 inputs:
+  url:
+    description: The orchestrator's work list API base address — the one the run prints at its start
+    required: true
+  token:
+    description: >-
+      The work list API's bearer token; where the run serves loopback with no
+      token, leave it empty — the SPINLOOP_API_TOKEN environment is the
+      fallback where the flag is not given
+    default: ""
   event:
     description: The issue event to work — opened (adds an item) or closed (removes one)
     default: ${{ github.event.action }}
-  items:
-    description: The work items file, relative to the repo root
-    default: work.yaml
   id:
     description: The item's id; defaults to the issue's number
     default: ${{ github.event.issue.number }}
@@ -42,9 +47,6 @@ inputs:
       A spinloop binary to work with instead of downloading a release; the
       version input is ignored where it is set
     default: ""
-  push:
-    description: "Commit and push the worked items file with the workflow's token — true, or false to leave committing to the caller"
-    default: "true"
   issue-title:
     description: The issue's title; defaulted from the event, named for a workflow that works an issue the event does not carry
     default: ${{ github.event.issue.title }}
@@ -124,12 +126,13 @@ runs:
         echo "bin=$BIN" >> "$GITHUB_OUTPUT"
 
     - id: work
-      name: Work the items file
+      name: Add or remove the item
       shell: bash
       env:
         BIN: ${{ steps.spinloop.outputs.bin }}
         EVENT: ${{ inputs.event }}
-        ITEMS: ${{ inputs.items }}
+        URL: ${{ inputs.url }}
+        TOKEN: ${{ inputs.token }}
         ID: ${{ inputs.id }}
         TEMPLATE: ${{ inputs.template }}
         DIR: ${{ inputs.dir }}
@@ -171,68 +174,43 @@ runs:
           done < <(printf '%s' "$TAGS" | tr ',' '\n')
         fi
 
-        MSG=""
+        API_ARGS=(--url "$URL")
+        if [ -n "$TOKEN" ]; then
+          API_ARGS+=(--api-token "$TOKEN")
+        fi
+
         case "$EVENT" in
           opened)
-            ADD_ARGS=(work add --items "$ITEMS" --id "$ID" --instructions "$INSTR" --dir "$DIR")
+            ADD_ARGS=("${API_ARGS[@]}" --id "$ID" --instructions "$INSTR" --dir "$DIR")
             if [ -n "$PRIORITY" ]; then ADD_ARGS+=(--priority "$PRIORITY"); fi
             if [ ${#TAG_ARGS[@]} -gt 0 ]; then ADD_ARGS+=("${TAG_ARGS[@]}"); fi
             set +e
-            OUT="$( "$BIN" "${ADD_ARGS[@]}" 2>&1 )"; RC=$?
+            OUT="$( "$BIN" work add "${ADD_ARGS[@]}" 2>&1 )"; RC=$?
             set -e
             if [ "$RC" -ne 0 ]; then
               case "$OUT" in
                 *"already carries an item with id"*)
-                  echo "item $ID is already in $ITEMS: nothing to add, the file is untouched"
+                  echo "item $ID is already in the work list: nothing to add, the run is untouched"
                   exit 0
                   ;;
                 *) printf '%s\n' "$OUT" >&2; exit "$RC" ;;
               esac
             fi
             printf '%s\n' "$OUT"
-            MSG="add item $ID (issue #$ISSUE_NUMBER)"
             ;;
           closed)
             set +e
-            OUT="$( "$BIN" work remove "$ID" --items "$ITEMS" 2>&1 )"; RC=$?
+            OUT="$( "$BIN" work remove "$ID" "${API_ARGS[@]}" 2>&1 )"; RC=$?
             set -e
             if [ "$RC" -ne 0 ]; then
               case "$OUT" in
                 *"carries no item with id"*)
-                  echo "item $ID is not in $ITEMS: nothing to remove, the file is untouched"
+                  echo "item $ID is not in the work list: nothing to remove, the run is untouched"
                   exit 0
                   ;;
                 *) printf '%s\n' "$OUT" >&2; exit "$RC" ;;
               esac
             fi
             printf '%s\n' "$OUT"
-            MSG="remove item $ID (issue #$ISSUE_NUMBER)"
             ;;
         esac
-        echo "msg=$MSG" >> "$GITHUB_OUTPUT"
-
-    - id: commit
-      name: Commit and push
-      shell: bash
-      env:
-        ITEMS: ${{ inputs.items }}
-        PUSH: ${{ inputs.push }}
-        MSG: ${{ steps.work.outputs.msg }}
-      run: |
-        set -euo pipefail
-
-        if [ "$PUSH" != "true" ]; then
-          echo "push is off: the items file is worked, but committing and pushing is left to the caller"
-          exit 0
-        fi
-
-        if git status --porcelain -- "$ITEMS" | grep -q .; then
-          git add -- "$ITEMS"
-          git -c user.name="github-actions[bot]" \
-              -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-              commit -m "$MSG"
-          git push origin "HEAD:$GITHUB_REF_NAME"
-          echo "committed and pushed the updated $ITEMS"
-        else
-          echo "the items file is unchanged: nothing to commit"
-        fi

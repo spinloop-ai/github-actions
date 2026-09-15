@@ -1,20 +1,21 @@
 # work-items
 
-A composite GitHub action that turns issue events into orchestrator work items.
-An issue **opened** adds an item to the work items file; an issue **closed**
-removes it. The items file is the backlog the
-[orchestrator](https://github.com/spinloop-ai/spinloop) works, so a backlog of
-issues becomes the backlog the orchestrator picks up, with no operator in
-between. The action works the file in the caller's repo and, where `push` is
-on, commits and pushes the result with the workflow's token.
+A composite GitHub action that keeps an orchestrator's work list in step with
+GitHub issues, over the
+[orchestrator's work list API](https://github.com/spinloop-ai/spinloop/blob/main/docs/commands/orchestrator.md#the-work-list-api).
+An issue **opened** adds an item to the work list; an issue **closed** removes
+it. The orchestrator runs wherever the `url` points — a server, a lab
+machine, a box in a rack — and the action is only its client, so a backlog of
+issues becomes the backlog the orchestrator works, with no operator in
+between and no file to commit.
 
 The action carries its own `spinloop`: it downloads the release it works with
 for the runner's platform, so a runner installs nothing. A spinloop release
-that carries the `work` command family is required.
+that carries the `work` command family is required (v1.40.0 and later).
 
 ## Use it
 
-Add a workflow to the repo that holds your work items file:
+Add a workflow to the repo whose issues are the work:
 
 ```yaml
 name: work items
@@ -23,66 +24,50 @@ on:
   issues:
     types: [opened, closed]
 
-permissions:
-  contents: write
-
 jobs:
   work-items:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-
       - uses: spinloop-ai/github-actions/work-items@main
         with:
-          items: work.yaml
-          dir: .
+          url: http://your-orchestrator:4010
+          token: ${{ secrets.ORCHESTRATOR_API_TOKEN }}
+          dir: /srv/work
           # Only issues carrying one of these labels become work. Where none
           # are named, every issue does.
           # labels: orchestration
 ```
 
-`contents: write` is what the push needs; drop it and set `push: "false"`
-where you commit the file yourself. The action pushes to the branch the
-workflow runs on.
-
-Pin `spinloop-ai/github-actions/work-items` to a tag once the action has
+No checkout, no `contents` permission: the action writes nothing to the repo.
+`dir` is where the item's agent works, on the machine the orchestrator runs —
+the runner's path means nothing there. Pin
+`spinloop-ai/github-actions/work-items` to a tag once the action has
 releases, rather than `main`.
-
-The orchestrator keeps its state, lock, logs, and abort markers beside the
-items file. Those are machine-local and must not be committed; where your
-items file is `work.yaml`, gitignore:
-
-```gitignore
-work.yaml.state.json
-work.yaml.lock
-work.yaml.logs/
-work.yaml.aborts/
-```
 
 ## Inputs
 
 | Input | Default | Meaning |
 | --- | --- | --- |
+| `url` | — (required) | the work list API's base address — the one the orchestrator prints at its start |
+| `token` | none | the API's bearer token; where the run serves loopback with no token, leave it empty, and `SPINLOOP_API_TOKEN` in the environment is the fallback where no flag is given |
 | `event` | the event's action | `opened` adds an item, `closed` removes one; nothing else is worked |
-| `items` | `work.yaml` | the work items file, relative to the repo root |
 | `id` | the issue's number | the item's id, overridable |
 | `template` | the issue's title, then its body | the item's instructions, rendered against the issue with `{{.Title}}`, `{{.Body}}`, `{{.Number}}`, `{{.URL}}`, `{{.Labels}}` |
-| `dir` | `.` | the directory the item's agent works in |
+| `dir` | `.` | the directory the item's agent works in, on the machine the orchestrator runs |
 | `tags` | none | the item's tags, comma-separated `key=value` pairs binding it to a kind of node |
 | `priority` | `0` | the item's priority, higher first |
 | `labels` | none | the labels an issue must carry, one of them, to become work; none named, every issue does |
-| `version` | `latest` | the spinloop release to work with, or a tag such as `v1.40.0` |
+| `version` | `latest` | the spinloop release the client downloads, or a tag such as `v1.40.0` |
 | `binary` | none | a spinloop binary to work with instead of downloading a release |
-| `push` | `true` | commit and push the worked file with the workflow's token |
 | `issue-title`, `issue-body`, `issue-number`, `issue-url`, `issue-labels` | the event's issue | the issue's fields; defaulted from the event, named for a workflow that works an issue the event does not carry |
 
-## What it does to the file
+## What it does to the work list
 
-The action calls the `work` command family: `spinloop work add` where the
-event is `opened`, `spinloop work remove` where it is `closed`. A re-run of
-the same event is a no-op: an id the file already carries is reported as
-already added, an id the file has let go is reported as already removed, and
-the file is untouched either way. A close whose item is running is refused the
-way `work remove` refuses it — naming the item and the abort that goes first —
-and the refusal stands as the action's failure; the action does not stop a
-live item on its own.
+The action calls the `work` command family against the API: `spinloop work
+add` where the event is `opened`, `spinloop work remove` where it is
+`closed`. A re-run of the same event is a no-op: an id the work list already
+carries is reported as already added, an id it no longer carries is reported
+as already removed, and the run is untouched either way. A close whose item is
+running is refused the way the API refuses it — naming the item and the abort
+that goes first — and the refusal stands as the action's failure; the action
+does not stop a live item on its own.
