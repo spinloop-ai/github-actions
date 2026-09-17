@@ -1,0 +1,239 @@
+name: E2E
+
+on:
+  workflow_dispatch:
+    inputs:
+      spinloop_ref:
+        description: The spinloop-ai/spinloop ref to build
+        type: string
+        default: main
+
+permissions:
+  contents: read
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/checkout@v7
+        with:
+          repository: spinloop-ai/spinloop
+          ref: ${{ inputs.spinloop_ref }}
+          path: spinloop-src
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version-file: spinloop-src/go.mod
+          cache: true
+
+      - name: Build spinloop
+        working-directory: spinloop-src
+        run: |
+          mkdir -p ../spinloop-bin
+          go build -o ../spinloop-bin/spinloop ./cmd/spinloop
+
+      - name: Start the stub gateway
+        run: |
+          set -euo pipefail
+          cat > stub-gateway.js <<'EOF'
+          // A fleet with no nodes: the orchestrator has a gateway that
+          // answers, so its run stays up, and nothing is ever admitted.
+          const http = require("http");
+          http
+            .createServer((req, res) => {
+              if (req.url === "/v1/fleet") {
+                res.writeHead(200, { "content-type": "application/json" });
+                res.end(JSON.stringify({ wake: false, prefer: "", nodes: [] }));
+                return;
+              }
+              res.writeHead(404, { "content-type": "application/json" });
+              res.end(JSON.stringify({ error: { message: "not served", type: "stub" } }));
+            })
+            .listen(4101, "127.0.0.1");
+          EOF
+          node stub-gateway.js &
+          echo $! > stub-gateway.pid
+          for _ in $(seq 1 50); do
+            if curl -fsS http://127.0.0.1:4101/v1/fleet > /dev/null 2>&1; then
+              exit 0
+            fi
+            sleep 0.1
+          done
+          echo "the stub gateway never came up" >&2
+          exit 1
+
+      - name: Start the orchestrator
+        run: |
+          set -euo pipefail
+          printf '[]\n' > work.yaml
+          export OPENAI_API_KEY=e2e-gateway-token
+          ./spinloop-bin/spinloop orchestrator -H opencode --items work.yaml \
+            --gateway http://127.0.0.1:4101 \
+            --listen 127.0.0.1:4110 \
+            --api-token e2e-token > orchestrator.log 2>&1 &
+          echo $! > orchestrator.pid
+          for _ in $(seq 1 50); do
+            if curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/health > /dev/null 2>&1; then
+              exit 0
+            fi
+            if ! kill -0 "$(cat orchestrator.pid)" 2>/dev/null; then
+              echo "the orchestrator died at startup:" >&2
+              cat orchestrator.log >&2
+              exit 1
+            fi
+            sleep 0.2
+          done
+          echo "the work list API never came up:" >&2
+          cat orchestrator.log >&2
+          exit 1
+
+      - name: The work list is empty before the event
+        run: |
+          set -euo pipefail
+          LIST="$(curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/v1/items)"
+          [ "$(printf '%s' "$LIST" | node -e 'let d="";process.stdin.on("data",c=>d+=c).on("end",()=>process.stdout.write(String(JSON.parse(d).data.length)))')" = "0" ]
+
+      - name: Create the work issue
+        id: work_issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="$(gh issue create --title 'e2e work item' --body 'resolve this')"
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: Create the not-work issue
+        id: not_work_issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          url="$(gh issue create --title 'e2e not work' --body 'leave this alone')"
+          echo "number=${url##*/}" >> "$GITHUB_OUTPUT"
+
+      - name: An opened issue adds an item
+        uses: ./work-items
+        with:
+          event: opened
+          binary: ./spinloop-bin/spinloop
+          url: http://127.0.0.1:4110
+          token: e2e-token
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          issue-title: e2e work item
+          issue-body: resolve this
+          dir: .
+
+      - name: Assert the item was added
+        run: |
+          set -euo pipefail
+          LIST="$(curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/v1/items)"
+          printf '%s\n' "$LIST"
+          grep -q "\"id\":\"${{ steps.work_issue.outputs.number }}\"" <<< "$LIST"
+          grep -q "\"state\":\"backlog\"" <<< "$LIST"
+
+      - name: A repeated open is a no-op
+        uses: ./work-items
+        with:
+          event: opened
+          binary: ./spinloop-bin/spinloop
+          url: http://127.0.0.1:4110
+          token: e2e-token
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          issue-title: e2e work item
+          issue-body: resolve this
+          dir: .
+
+      - name: Assert the item appears once
+        run: |
+          set -euo pipefail
+          LIST="$(curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/v1/items)"
+          COUNT="$(grep -o "\"id\":\"${{ steps.work_issue.outputs.number }}\"" <<< "$LIST" | wc -l)"
+          [ "$COUNT" = 1 ]
+
+      - name: Close the work issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh issue close "${{ steps.work_issue.outputs.number }}"
+
+      - name: A closed issue removes the item
+        uses: ./work-items
+        with:
+          event: closed
+          binary: ./spinloop-bin/spinloop
+          url: http://127.0.0.1:4110
+          token: e2e-token
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          dir: .
+
+      - name: Assert the item was removed
+        run: |
+          set -euo pipefail
+          LIST="$(curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/v1/items)"
+          if grep -q "\"id\":\"${{ steps.work_issue.outputs.number }}\"" <<< "$LIST"; then
+            echo "the item for the closed issue should be gone" >&2
+            exit 1
+          fi
+
+      - name: A repeated close is a no-op
+        uses: ./work-items
+        with:
+          event: closed
+          binary: ./spinloop-bin/spinloop
+          url: http://127.0.0.1:4110
+          token: e2e-token
+          id: ${{ steps.work_issue.outputs.number }}
+          issue-number: ${{ steps.work_issue.outputs.number }}
+          dir: .
+
+      - name: Assert the item is still gone
+        run: |
+          set -euo pipefail
+          LIST="$(curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/v1/items)"
+          if grep -q "\"id\":\"${{ steps.work_issue.outputs.number }}\"" <<< "$LIST"; then
+            echo "the item for the closed issue should be gone" >&2
+            exit 1
+          fi
+
+      - name: An issue without the wanted label is not work
+        uses: ./work-items
+        with:
+          event: opened
+          binary: ./spinloop-bin/spinloop
+          url: http://127.0.0.1:4110
+          token: e2e-token
+          id: ${{ steps.not_work_issue.outputs.number }}
+          issue-number: ${{ steps.not_work_issue.outputs.number }}
+          issue-title: e2e not work
+          issue-body: leave this alone
+          issue-labels: ""
+          labels: orchestration
+          dir: .
+
+      - name: Assert the not-work issue added nothing
+        run: |
+          set -euo pipefail
+          LIST="$(curl -fsS -H "Authorization: Bearer e2e-token" http://127.0.0.1:4110/v1/items)"
+          if grep -q "\"id\":\"${{ steps.not_work_issue.outputs.number }}\"" <<< "$LIST"; then
+            echo "the not-work issue should not have become work" >&2
+            exit 1
+          fi
+
+      - name: Close both issues
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh issue close "${{ steps.work_issue.outputs.number }}" || true
+          gh issue close "${{ steps.not_work_issue.outputs.number }}" || true
+
+      - name: Stop the orchestrator and the stub gateway
+        if: always()
+        run: |
+          kill "$(cat orchestrator.pid)" 2>/dev/null || true
+          kill "$(cat stub-gateway.pid)" 2>/dev/null || true

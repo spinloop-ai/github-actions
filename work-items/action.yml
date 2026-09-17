@@ -1,0 +1,216 @@
+name: work-items
+description: >-
+  Keep an orchestrator's work list in step with GitHub issues, over the
+  orchestrator's work list API: an issue opened adds an item, a closed issue
+  removes it — the orchestrator runs wherever the URL points.
+
+inputs:
+  url:
+    description: The orchestrator's work list API base address — the one the run prints at its start
+    required: true
+  token:
+    description: >-
+      The work list API's bearer token; where the run serves loopback with no
+      token, leave it empty — the SPINLOOP_API_TOKEN environment is the
+      fallback where the flag is not given
+    default: ""
+  event:
+    description: The issue event to work — opened (adds an item) or closed (removes one)
+    default: ${{ github.event.action }}
+  id:
+    description: The item's id; defaults to the issue's number
+    default: ${{ github.event.issue.number }}
+  template:
+    description: >-
+      The item's instructions, rendered against the issue with {{.Title}},
+      {{.Body}}, {{.Number}}, {{.URL}} and {{.Labels}}
+    default: "{{.Title}}\n\n{{.Body}}"
+  dir:
+    description: The directory the item's agent works in, on the machine the orchestrator runs
+    default: .
+  tags:
+    description: The item's tags, comma-separated key=value pairs binding it to a kind of node
+    default: ""
+  priority:
+    description: The item's priority, higher first
+    default: "0"
+  labels:
+    description: >-
+      The labels an issue must carry, one of them, to become work,
+      comma-separated; where none are named, every issue does
+    default: ""
+  version:
+    description: The spinloop release to work with — latest, or a tag
+    default: latest
+  binary:
+    description: >-
+      A spinloop binary to work with instead of downloading a release; the
+      version input is ignored where it is set
+    default: ""
+  issue-title:
+    description: The issue's title; defaulted from the event, named for a workflow that works an issue the event does not carry
+    default: ${{ github.event.issue.title }}
+  issue-body:
+    description: The issue's body; defaulted from the event, named for a workflow that works an issue the event does not carry
+    default: ${{ github.event.issue.body }}
+  issue-number:
+    description: The issue's number; defaulted from the event, named for a workflow that works an issue the event does not carry
+    default: ${{ github.event.issue.number }}
+  issue-url:
+    description: The issue's URL; defaulted from the event, named for a workflow that works an issue the event does not carry
+    default: ${{ github.event.issue.html_url }}
+  issue-labels:
+    description: The issue's labels, comma-separated; defaulted from the event, named for a workflow that works an issue the event does not carry
+    default: ${{ join(github.event.issue.labels.*.name, ',') }}
+
+runs:
+  using: composite
+  steps:
+    - id: spinloop
+      name: Resolve spinloop
+      shell: bash
+      env:
+        BINARY: ${{ inputs.binary }}
+        VERSION: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        if [ -n "$BINARY" ]; then
+          if [ ! -x "$BINARY" ]; then
+            echo "the binary input names $BINARY, which is not an executable file: point it at a built spinloop" >&2
+            exit 1
+          fi
+          BIN="$BINARY"
+        else
+          if [ "$VERSION" = "latest" ]; then
+            TAG="$(node -e 'const h={headers:{}};if(process.env.GITHUB_TOKEN)h.headers.authorization="Bearer "+process.env.GITHUB_TOKEN;fetch("https://api.github.com/repos/spinloop-ai/spinloop/releases/latest",h).then(r=>{if(!r.ok){console.error("looking up the latest spinloop release failed with HTTP "+r.status);process.exit(1)}return r.json()}).then(j=>console.log(j.tag_name))')"
+          else
+            TAG="$VERSION"
+          fi
+          case "$TAG" in v*) ;; *) TAG="v$TAG" ;; esac
+
+          case "$RUNNER_OS" in
+            Linux) OS=linux ;;
+            macOS) OS=darwin ;;
+            Windows) OS=windows ;;
+            *) echo "the runner's operating system $RUNNER_OS has no spinloop release asset" >&2; exit 1 ;;
+          esac
+          case "$RUNNER_ARCH" in
+            X64) ARCH=amd64 ;;
+            ARM64) ARCH=arm64 ;;
+            *) echo "the runner's architecture $RUNNER_ARCH has no spinloop release asset: use an x64 or arm64 runner" >&2; exit 1 ;;
+          esac
+          case "$OS" in
+            windows) EXT=zip ;;
+            *) EXT=tar.gz ;;
+          esac
+
+          ASSET="spinloop_${OS}_${ARCH}.${EXT}"
+          URL="https://github.com/spinloop-ai/spinloop/releases/download/${TAG}/${ASSET}"
+          echo "downloading spinloop $TAG ($ASSET)"
+          DIR="$(mktemp -d)"
+          curl -fSL "$URL" -o "$DIR/$ASSET"
+          tar -xf "$DIR/$ASSET" -C "$DIR"
+          BIN="$(find "$DIR" -type f \( -name spinloop -o -name spinloop.exe \) | head -n 1)"
+          if [ -z "$BIN" ]; then
+            echo "no spinloop binary in $ASSET for $TAG" >&2
+            exit 1
+          fi
+          chmod +x "$BIN"
+        fi
+
+        if ! "$BIN" work add --help 2>&1 | grep -q -- "--url"; then
+          echo "the spinloop at $BIN has no API-based work command: its work commands still work the items file — pin version to a release that carries the API-based work command family, or pass a local build via binary" >&2
+          exit 1
+        fi
+        echo "bin=$BIN" >> "$GITHUB_OUTPUT"
+
+    - id: work
+      name: Add or remove the item
+      shell: bash
+      env:
+        BIN: ${{ steps.spinloop.outputs.bin }}
+        EVENT: ${{ inputs.event }}
+        URL: ${{ inputs.url }}
+        TOKEN: ${{ inputs.token }}
+        ID: ${{ inputs.id }}
+        TEMPLATE: ${{ inputs.template }}
+        DIR: ${{ inputs.dir }}
+        TAGS: ${{ inputs.tags }}
+        PRIORITY: ${{ inputs.priority }}
+        LABELS: ${{ inputs.labels }}
+        ISSUE_TITLE: ${{ inputs.issue-title }}
+        ISSUE_BODY: ${{ inputs.issue-body }}
+        ISSUE_NUMBER: ${{ inputs.issue-number }}
+        ISSUE_URL: ${{ inputs.issue-url }}
+        ISSUE_LABELS: ${{ inputs.issue-labels }}
+      run: |
+        set -euo pipefail
+
+        case "$EVENT" in
+          opened|closed) ;;
+          *) echo "event $EVENT is not one the action works: it works opened (adds an item) and closed (removes one)" >&2; exit 1 ;;
+        esac
+
+        INDIR="$(mktemp)"
+        export INDIR
+        GATE="$(node "${{ github.action_path }}/lib/render.js")"
+        case "$GATE" in
+          SKIP:*)
+            echo "$GATE"
+            exit 0
+            ;;
+          GO) ;;
+          *) echo "the render step said $GATE, which is neither GO nor SKIP" >&2; exit 1 ;;
+        esac
+
+        INSTR="$(cat "$INDIR")"
+
+        TAG_ARGS=()
+        if [ -n "$TAGS" ]; then
+          while IFS= read -r t || [ -n "$t" ]; do
+            t="$(printf '%s' "$t" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
+            if [ -n "$t" ]; then TAG_ARGS+=("--tag" "$t"); fi
+          done < <(printf '%s' "$TAGS" | tr ',' '\n')
+        fi
+
+        API_ARGS=(--url "$URL")
+        if [ -n "$TOKEN" ]; then
+          API_ARGS+=(--api-token "$TOKEN")
+        fi
+
+        case "$EVENT" in
+          opened)
+            ADD_ARGS=("${API_ARGS[@]}" --id "$ID" --instructions "$INSTR" --dir "$DIR")
+            if [ -n "$PRIORITY" ]; then ADD_ARGS+=(--priority "$PRIORITY"); fi
+            if [ ${#TAG_ARGS[@]} -gt 0 ]; then ADD_ARGS+=("${TAG_ARGS[@]}"); fi
+            set +e
+            OUT="$( "$BIN" work add "${ADD_ARGS[@]}" 2>&1 )"; RC=$?
+            set -e
+            if [ "$RC" -ne 0 ]; then
+              case "$OUT" in
+                *"already carries an item with id"*)
+                  echo "item $ID is already in the work list: nothing to add, the run is untouched"
+                  exit 0
+                  ;;
+                *) printf '%s\n' "$OUT" >&2; exit "$RC" ;;
+              esac
+            fi
+            printf '%s\n' "$OUT"
+            ;;
+          closed)
+            set +e
+            OUT="$( "$BIN" work remove "$ID" "${API_ARGS[@]}" 2>&1 )"; RC=$?
+            set -e
+            if [ "$RC" -ne 0 ]; then
+              case "$OUT" in
+                *"carries no item with id"*)
+                  echo "item $ID is not in the work list: nothing to remove, the run is untouched"
+                  exit 0
+                  ;;
+                *) printf '%s\n' "$OUT" >&2; exit "$RC" ;;
+              esac
+            fi
+            printf '%s\n' "$OUT"
+            ;;
+        esac
